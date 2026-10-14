@@ -1,0 +1,157 @@
+# Reproducible experimental LiveContainer + SideStore build, 14 October 2026.
+name: Build LiveContainer + SideStore (2FA fix)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-livecontainer-sidestore-80045.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build patched IPA on macOS
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      LIVECONTAINER_COMMIT: 4dbe0f9a626de801184a42c0be8d2cb105058e3d
+      SIDESTORE_COMMIT: 12a496ca1c766a102193634879823d16610bf1cd
+      SIDESIGN_OLD_COMMIT: df2b8e4257454f0c7629276d409d6e9d7953fdf6
+      SIDESIGN_FIXED_COMMIT: 752d1ef602aa792a432ffa1e71646dc1ecf7363c
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26.4 for SideStore
+        uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: '26.4'
+
+      - name: Install required tools
+        run: brew install ldid xcbeautify wget
+
+      - name: Check out LiveContainer's SideStore fork
+        uses: actions/checkout@v4
+        with:
+          repository: LiveContainer/SideStore
+          ref: 12a496ca1c766a102193634879823d16610bf1cd
+          path: vendor/SideStore
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Update the SideSign submodule to the fixed commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C vendor/SideStore rev-parse HEAD)" = "$SIDESTORE_COMMIT"
+          test "$(git -C vendor/SideStore/Dependencies/SideSign rev-parse HEAD)" = "$SIDESIGN_OLD_COMMIT"
+          git -C vendor/SideStore/Dependencies/SideSign fetch --no-tags --depth=1 origin "$SIDESIGN_FIXED_COMMIT"
+          git -C vendor/SideStore/Dependencies/SideSign checkout --detach "$SIDESIGN_FIXED_COMMIT"
+          test "$(git -C vendor/SideStore/Dependencies/SideSign rev-parse HEAD)" = "$SIDESIGN_FIXED_COMMIT"
+          grep -q 'PushedCodeState' vendor/SideStore/Dependencies/SideSign/Sources/DeveloperPortal/Authentication.swift
+
+      - name: Preload SwiftPM binary dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$HOME/Library/Caches/org.swift.swiftpm/artifacts"
+          mkdir -p "$dir"
+          openssl="$dir/https___github_com_krzyzanowskim_OpenSSL_releases_download_3_6_2000_OpenSSL_xcframework_zip"
+          unicorn="$dir/https___github_com_mahee96_unicorn_releases_download_2_1_4_multiarch_Unicorn_xcframework_zip"
+          test -f "$openssl" || curl -fsSL --retry 3 -o "$openssl" 'https://github.com/krzyzanowskim/OpenSSL/releases/download/3.6.2000/OpenSSL.xcframework.zip'
+          test -f "$unicorn" || curl -fsSL --retry 3 -o "$unicorn" 'https://github.com/mahee96/unicorn/releases/download/2.1.4-multiarch/Unicorn.xcframework.zip'
+
+      - name: Build patched SideStore
+        shell: bash
+        working-directory: vendor/SideStore
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/workflow.py build
+          test -s SideStore.ipa
+          unzip -tq SideStore.ipa >/dev/null
+          unzip -Z1 SideStore.ipa | grep -qx 'Payload/SideStore.app/SideStore'
+          shasum -a 256 SideStore.ipa
+
+      - name: Select Xcode 26.2 for LiveContainer
+        uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: '26.2'
+
+      - name: Check out LiveContainer
+        uses: actions/checkout@v4
+        with:
+          repository: LiveContainer/LiveContainer
+          ref: 4dbe0f9a626de801184a42c0be8d2cb105058e3d
+          path: vendor/LiveContainer
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Archive LiveContainer
+        shell: bash
+        working-directory: vendor/LiveContainer
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$LIVECONTAINER_COMMIT"
+          xcodebuild archive -archivePath archive -scheme LiveContainer -project LiveContainer.xcodeproj -sdk iphoneos -arch arm64 -configuration Release 2>&1 | xcbeautify --renderer github-actions
+          test -d archive.xcarchive/Products/Applications/LiveContainer.app
+
+      - name: Package LiveContainer using the just-built SideStore
+        shell: bash
+        working-directory: vendor/LiveContainer
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/build_github.sh')
+          script = path.read_text()
+          original = 'wget https://github.com/LiveContainer/SideStore/releases/download/nightly/SideStore.ipa'
+          replacement = 'cp "$GITHUB_WORKSPACE/vendor/SideStore/SideStore.ipa" SideStore.ipa'
+          if script.count(original) != 1:
+              raise SystemExit('Unexpected upstream build script: refusing to apply unverified replacement')
+          path.write_text(script.replace(original, replacement))
+          PY
+          scheme=LiveContainer archive_path=archive sh .github/build_github.sh
+
+      - name: Validate packaged IPA and record hashes
+        shell: bash
+        working-directory: vendor/LiveContainer
+        run: |
+          set -euo pipefail
+          test -s LiveContainer.ipa
+          test -s LiveContainer+SideStore.ipa
+          unzip -tq LiveContainer+SideStore.ipa >/dev/null
+          unzip -Z1 LiveContainer+SideStore.ipa | grep -qx 'Payload/LiveContainer.app/Frameworks/SideStoreApp.framework/SideStore'
+          {
+            echo 'Experimental LiveContainer + SideStore build (Apple 2FA fix)'
+            echo "Build date (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "LiveContainer: $LIVECONTAINER_COMMIT"
+            echo "SideStore fork: $SIDESTORE_COMMIT"
+            echo "Original SideSign: $SIDESIGN_OLD_COMMIT"
+            echo "Updated SideSign: $SIDESIGN_FIXED_COMMIT"
+            echo 'SHA-256:'
+            shasum -a 256 LiveContainer.ipa LiveContainer+SideStore.ipa ../SideStore/SideStore.ipa
+          } | tee provenance.txt
+
+      - name: Upload completed IPAs and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveContainer-SideStore-patched
+          path: |
+            vendor/LiveContainer/LiveContainer+SideStore.ipa
+            vendor/LiveContainer/LiveContainer.ipa
+            vendor/LiveContainer/provenance.txt
+          if-no-files-found: error
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-logs
+          path: |
+            vendor/SideStore/build/logs/
+            vendor/LiveContainer/*.log
+          if-no-files-found: ignore
