@@ -19,8 +19,7 @@ jobs:
     timeout-minutes: 120
     env:
       LIVECONTAINER_COMMIT: 4dbe0f9a626de801184a42c0be8d2cb105058e3d
-      SIDESTORE_COMMIT: 12a496ca1c766a102193634879823d16610bf1cd
-      SIDESIGN_OLD_COMMIT: df2b8e4257454f0c7629276d409d6e9d7953fdf6
+      SIDESTORE_COMMIT: 99d0bd275aa6723aa84b2b525e566a453509185f
       SIDESIGN_FIXED_COMMIT: 752d1ef602aa792a432ffa1e71646dc1ecf7363c
 
     steps:
@@ -34,23 +33,20 @@ jobs:
       - name: Install required tools
         run: brew install ldid xcbeautify wget
 
-      - name: Check out LiveContainer's SideStore fork
+      - name: Check out bitceil's patched SideStore fork
         uses: actions/checkout@v4
         with:
-          repository: LiveContainer/SideStore
-          ref: 12a496ca1c766a102193634879823d16610bf1cd
+          repository: bitceil/SideStore
+          ref: 99d0bd275aa6723aa84b2b525e566a453509185f
           path: vendor/SideStore
           submodules: recursive
           fetch-depth: 1
 
-      - name: Update the SideSign submodule to the fixed commit
+      - name: Verify the bundled SideSign revision
         shell: bash
         run: |
           set -euo pipefail
           test "$(git -C vendor/SideStore rev-parse HEAD)" = "$SIDESTORE_COMMIT"
-          test "$(git -C vendor/SideStore/Dependencies/SideSign rev-parse HEAD)" = "$SIDESIGN_OLD_COMMIT"
-          git -C vendor/SideStore/Dependencies/SideSign fetch --no-tags --depth=1 origin "$SIDESIGN_FIXED_COMMIT"
-          git -C vendor/SideStore/Dependencies/SideSign checkout --detach "$SIDESIGN_FIXED_COMMIT"
           test "$(git -C vendor/SideStore/Dependencies/SideSign rev-parse HEAD)" = "$SIDESIGN_FIXED_COMMIT"
           grep -q 'PushedCodeState' vendor/SideStore/Dependencies/SideSign/Sources/DeveloperPortal/Authentication.swift
 
@@ -130,8 +126,7 @@ jobs:
             echo "Build date (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
             echo "LiveContainer: $LIVECONTAINER_COMMIT"
             echo "SideStore fork: $SIDESTORE_COMMIT"
-            echo "Original SideSign: $SIDESIGN_OLD_COMMIT"
-            echo "Updated SideSign: $SIDESIGN_FIXED_COMMIT"
+            echo "SideSign: $SIDESIGN_FIXED_COMMIT"
             echo 'SHA-256:'
             shasum -a 256 LiveContainer.ipa LiveContainer+SideStore.ipa ../SideStore/SideStore.ipa
           } | tee provenance.txt
